@@ -1,0 +1,81 @@
+plugins {
+    id 'java-library'
+    id 'eclipse'
+    id 'idea'
+    id 'net.neoforged.moddev.legacyforge' version '2.0.86'
+}
+
+version = mod_version
+group = mod_group_id
+
+base {
+    archivesName = mod_name
+}
+
+java.toolchain.languageVersion = JavaLanguageVersion.of(17)
+
+legacyForge {
+    version = "${minecraft_version}-${forge_version}"
+
+    mods {
+        ae2layeredpackager {
+            sourceSet sourceSets.main
+        }
+    }
+
+    runs {
+        client {
+            client()
+        }
+
+        server {
+            server()
+        }
+
+        data {
+            data()
+            programArguments.addAll '--mod', project.mod_id, '--all', '--output', file('src/generated/resources/').getAbsolutePath(), '--existing', file('src/main/resources/').getAbsolutePath()
+        }
+    }
+}
+
+repositories {
+    mavenCentral()
+    maven {
+        name = "TerraformersMC"
+        url = "https://maven.terraformersmc.com/"
+    }
+    maven {
+        name = "Modmaven"
+        url = "https://modmaven.dev/"
+    }
+    maven {
+        url = "https://www.cursemaven.com"
+        content {
+            includeGroup "curse.maven"
+        }
+    }
+    maven {
+        url = "https://maven.blamejared.com/"
+    }
+}
+
+dependencies {
+    // AE2 - 核心依赖
+    implementation "appeng:appliedenergistics2-forge:15.4.10"
+
+    // EMI - 客户端必需
+    compileOnly "dev.emi:emi-forge:1.1.22+1.20.1"
+}
+
+dependencies {
+    annotationProcessor 'org.spongepowered:mixin:0.8.5:processor'
+}
+
+// IDE settings
+idea {
+    module {
+        downloadSources = true
+        downloadJavadoc = true
+    }
+}

@@ -1,0 +1,51 @@
+modLoader = "javafml"
+loaderVersion = "[1,)"
+license = "LGPL-3.0"
+issueTrackerURL = "https://github.com/ae2lp/ae2layeredpackager/issues"
+
+[[mods]]
+    modId = "ae2lp"
+    version = "1.0.0"
+    displayName = "AE2 Layered Packager"
+    logoFile = "ae2lp.png"
+    credits = "ae2lp"
+    authors = "ae2lp"
+    description = '''
+AE2 Layered Packager
+
+A client-side mod that provides multi-pattern encoding for layered GregTech recipes
+using AE2 storage cells. Also includes a future packager block for item/fluid packaging.
+
+Features:
+- Auto-encode layered GT recipes into multiple AE2 patterns
+- Uses storage cells (expandedae dual cells or AE2 vanilla cells) as intermediate buffers
+- Step-by-step pattern generation with capacity-aware cell allocation
+'''
+
+[[dependencies.ae2lp]]
+    modId = "forge"
+    mandatory = true
+    versionRange = "[47,)"
+    ordering = "NONE"
+    side = "BOTH"
+
+[[dependencies.ae2lp]]
+    modId = "minecraft"
+    mandatory = true
+    versionRange = "[1.20.1,1.21)"
+    ordering = "NONE"
+    side = "BOTH"
+
+[[dependencies.ae2lp]]
+    modId = "ae2"
+    mandatory = false
+    versionRange = "[15.4,)"
+    ordering = "NONE"
+    side = "BOTH"
+
+[[dependencies.ae2lp]]
+    modId = "emi"
+    mandatory = false
+    versionRange = "[1.1,)"
+    ordering = "NONE"
+    side = "CLIENT"

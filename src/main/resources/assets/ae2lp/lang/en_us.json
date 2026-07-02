@@ -1,0 +1,12 @@
+{
+  "itemGroup.ae2lp": "AE2 Layered Packager",
+  "block.ae2lp.packager": "Packager",
+
+  "key.ae2lp.patternize": "Patternize Layered Recipe",
+  "key.categories.ae2lp": "AE2 Layered Packager",
+
+  "config.ae2lp.cellPriority": "Storage Cell Priority",
+  "config.ae2lp.cellPriority.tooltip": "DEFAULT: prefer dual_storage_cell, fallback to vanilla\nPREFER_VANILLA: always use vanilla AE2 cells\nPREFER_DUAL: force dual_storage_cell",
+  "config.ae2lp.delayPerOperation": "Delay Per Operation (ms)",
+  "config.ae2lp.delayAdditionalPerPattern": "Additional Delay Per Pattern (ms)"
+}
