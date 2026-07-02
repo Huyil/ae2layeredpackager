@@ -20,3 +20,6 @@ run/
 # Local files
 gradle-*.zip
 *.log
+
+# Claude Code local config
+.claude/

@@ -5,7 +5,7 @@ issueTrackerURL = "https://github.com/ae2lp/ae2layeredpackager/issues"
 
 [[mods]]
     modId = "ae2lp"
-    version = "1.0.0"
+    version = "1.1.0"
     displayName = "AE2 Layered Packager"
     logoFile = ""
     credits = "ae2lp"

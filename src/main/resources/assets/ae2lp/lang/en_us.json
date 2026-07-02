@@ -2,7 +2,8 @@
   "itemGroup.ae2lp": "AE2 Layered Packager",
   "block.ae2lp.packager": "Packager",
 
-  "key.ae2lp.patternize": "Patternize Layered Recipe",
+  "key.ae2lp.patternize": "Patternize Layered Recipe (Ctrl+Shift+P)",
+  "key.ae2lp.debug_screen": "Debug: Print Current Screen Info (F10)",
   "key.categories.ae2lp": "AE2 Layered Packager",
 
   "config.ae2lp.cellPriority": "Storage Cell Priority",

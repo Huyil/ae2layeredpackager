@@ -37,6 +37,7 @@ public class AELayeredPackager {
             modEventBus.addListener(this::clientSetup);
             LPKeybinds.register();
             forgeEventBus.addListener(PatternizeManager::onKeyPressed);
+            forgeEventBus.addListener(PatternizeManager::onDebugKeyPressed);
         });
 
         LOGGER.info("AE2 Layered Packager initialized");

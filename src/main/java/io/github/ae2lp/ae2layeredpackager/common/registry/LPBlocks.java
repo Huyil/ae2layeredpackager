@@ -20,9 +20,9 @@ public class LPBlocks {
     public static final DeferredRegister<Item> ITEMS =
             DeferredRegister.create(ForgeRegistries.ITEMS, AELayeredPackager.MOD_ID);
 
-    // 打包机方块
-    public static final RegistryObject<Block> PACKAGER = register("packager",
-            PackagerBlock::new);
+    // 打包机方块 — 暂时禁用，未来实现 BlockEntity 后再启用
+    // public static final RegistryObject<Block> PACKAGER = register("packager",
+    //         PackagerBlock::new);
 
     private static <T extends Block> RegistryObject<T> register(String name, Supplier<T> block) {
         RegistryObject<T> registered = BLOCKS.register(name, block);

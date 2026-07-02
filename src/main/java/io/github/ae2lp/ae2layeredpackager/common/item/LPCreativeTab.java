@@ -18,9 +18,9 @@ public class LPCreativeTab {
     public static final RegistryObject<CreativeModeTab> MAIN_TAB = TABS.register("main",
             () -> CreativeModeTab.builder()
                     .title(Component.translatable("itemGroup.ae2lp"))
-                    .icon(() -> new ItemStack(LPBlocks.PACKAGER.get()))
+                    .icon(() -> ItemStack.EMPTY)
                     .displayItems((params, output) -> {
-                        output.accept(LPBlocks.PACKAGER.get());
+                        // 暂不添加物品，避免方块未注册时崩溃
                     })
                     .build());
 

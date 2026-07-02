@@ -1,16 +1,28 @@
 package io.github.ae2lp.ae2layeredpackager.client.patternizer;
 
+import appeng.api.config.Actionable;
+import appeng.api.networking.security.IActionSource;
+import appeng.api.stacks.AEFluidKey;
+import appeng.api.stacks.AEItemKey;
+import appeng.api.stacks.AEKey;
+import appeng.api.storage.StorageCells;
+import appeng.api.storage.cells.StorageCell;
+import com.mojang.logging.LogUtils;
+import io.github.ae2lp.ae2layeredpackager.LPConfig;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.ListTag;
 import net.minecraft.nbt.LongTag;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.level.material.Fluid;
 import net.minecraftforge.common.ForgeSpawnEggItem;
 import net.minecraftforge.registries.ForgeRegistries;
+import org.slf4j.Logger;
 import javax.annotation.Nullable;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 
 /**
@@ -19,6 +31,10 @@ import java.util.List;
  * 所有 expandedae 引用均通过 Item ID 字符串，无 Java 类硬依赖。
  */
 public class CellAllocator {
+
+    private static final Logger LOGGER = LogUtils.getLogger();
+
+    // ==================== 存储元件 ID 列表 ====================
 
     // ==================== 存储元件 ID 列表 ====================
 
@@ -49,26 +65,36 @@ public class CellAllocator {
             "ae2:fluid_storage_cell_256k",
     };
 
-    // AE2 存储元件容量 (字节)
-    private static final long[] CELL_CAPACITIES = {
-            1024 * 8,    // 1k  = 8192 bytes
-            1024 * 32,   // 4k  = 32768
-            1024 * 128,  // 16k = 131072
-            1024 * 512,  // 64k = 524288
-            1024 * 2048, // 256k = 2097152
+    // 每个等级的实际字节数 (kilobytes * 1024)
+    // 来源: AE2 BasicStorageCell / expandedae DualStorageCell
+    private static final long[] CELL_TOTAL_BYTES = {
+            1L * 1024,    // 1k
+            4L * 1024,    // 4k
+            16L * 1024,   // 16k
+            64L * 1024,   // 64k
+            256L * 1024,  // 256k
     };
 
-    // AE2 存储元件类型槽数
-    private static final int[] CELL_TYPE_SLOTS = {
-            3,   // 1k
-            6,   // 4k
-            12,  // 16k
-            24,  // 64k
-            48,  // 256k
+    // 每个等级的 bytesPerType (kilobytes * 8)
+    // 来源: AE2 BasicStorageCell / expandedae DualStorageCell
+    private static final long[] CELL_BYTES_PER_TYPE = {
+            8L,    // 1k
+            32L,   // 4k
+            128L,  // 16k
+            512L,  // 64k
+            2048L, // 256k
     };
 
-    // 每种物品类型占用的字节数
-    private static final long BYTES_PER_TYPE = 8;
+    // AE2 原版物品存储元件总类型数
+    private static final int VANILLA_ITEM_TOTAL_TYPES = 63;
+    // AE2 原版流体存储元件总类型数（流体更少）
+    private static final int VANILLA_FLUID_TOTAL_TYPES = 18;
+    // expandedae dual cell 总类型数
+    private static final int DUAL_TOTAL_TYPES = 63;
+
+    // AE2 amount_per_byte
+    private static final long ITEM_AMOUNT_PER_BYTE = 8;
+    private static final long FLUID_AMOUNT_PER_BYTE = 8000; // 8 桶 × 1000L/桶
 
     /**
      * 分配结果：一个步骤需要的存储元件列表
@@ -107,13 +133,41 @@ public class CellAllocator {
         public int getTotalTypes() {
             return items.size() + fluids.size();
         }
+
+        /**
+         * 计算物料内容的规范签名（顺序无关），用于去重比较。
+         * 两个 StepContents 签名相同 → 装到同一类型 cell 后产生完全相同的 cell NBT。
+         */
+        public String contentSignature() {
+            List<String> itemSigs = new ArrayList<>();
+            for (ItemStack stack : items) {
+                String id = ForgeRegistries.ITEMS.getKey(stack.getItem()).toString();
+                String nbt = stack.hasTag() ? stack.getTag().toString() : "";
+                itemSigs.add(id + "x" + stack.getCount() + nbt);
+            }
+            Collections.sort(itemSigs);
+
+            List<String> fluidSigs = new ArrayList<>();
+            for (ItemStack marker : fluids) {
+                if (marker.hasTag() && marker.getTag().contains("fluid_id")) {
+                    String id = marker.getTag().getString("fluid_id");
+                    int amount = marker.getTag().getInt("amount");
+                    String ftag = marker.getTag().contains("fluid_tag")
+                            ? marker.getTag().getCompound("fluid_tag").toString() : "";
+                    fluidSigs.add(id + "x" + amount + ftag);
+                }
+            }
+            Collections.sort(fluidSigs);
+
+            return "I[" + String.join(",", itemSigs) + "]F[" + String.join(",", fluidSigs) + "]";
+        }
     }
 
     /**
      * 为一步骤分配存储元件
      *
      * @param contents 该步骤的物料 (物品和流体)
-     * @return 分配结果，或 null 如果无法分配
+     * @return 分配结果，null 表示无法分配真实 cell；此时可调用 allocateEmptyMarker() 获取占位标记
      */
     @Nullable
     public static CellAssignment allocate(StepContents contents) {
@@ -126,19 +180,19 @@ public class CellAllocator {
         // 检查 expandedae 是否可用
         boolean hasExpandedAE = checkModLoaded("expandedae");
 
-        CellPriority priority = CellPriority.DEFAULT; // Will be read from config
+        LPConfig.CellPriority priority = LPConfig.CELL_PRIORITY.get();
 
         List<ItemStack> emptyCells = new ArrayList<>();
         List<ItemStack> filledCells = new ArrayList<>();
 
         if (hasBoth) {
             // 既有物品又有流体
-            if (priority == CellPriority.PREFER_DUAL && !hasExpandedAE) {
+            if (priority == LPConfig.CellPriority.PREFER_DUAL && !hasExpandedAE) {
                 return null; // 强制 dual 但不可用
             }
 
-            if ((priority == CellPriority.DEFAULT && hasExpandedAE)
-                    || priority == CellPriority.PREFER_DUAL) {
+            if ((priority == LPConfig.CellPriority.DEFAULT && hasExpandedAE)
+                    || priority == LPConfig.CellPriority.PREFER_DUAL) {
                 // 尝试 dual_storage_cell
                 ItemStack dualCell = allocateDualCell(contents);
                 if (dualCell != null) {
@@ -185,13 +239,13 @@ public class CellAllocator {
     @Nullable
     private static ItemStack allocatePreferredCell(List<ItemStack> stacks, boolean isFluid) {
         boolean hasExpandedAE = checkModLoaded("expandedae");
-        CellPriority priority = CellPriority.DEFAULT; // TODO: read from config
+        LPConfig.CellPriority priority = LPConfig.CELL_PRIORITY.get();
 
-        if (priority == CellPriority.PREFER_VANILLA) {
+        if (priority == LPConfig.CellPriority.PREFER_VANILLA) {
             return allocateVanillaCell(stacks, isFluid);
         }
 
-        if (hasExpandedAE && priority != CellPriority.PREFER_VANILLA) {
+        if (hasExpandedAE && priority != LPConfig.CellPriority.PREFER_VANILLA) {
             // 尝试 dual_storage_cell
             StepContents contents = isFluid
                     ? new StepContents(List.of(), stacks)
@@ -205,20 +259,26 @@ public class CellAllocator {
 
     /**
      * 分配 dual_storage_cell
+     * dual cell 同时容纳物品和流体，amount_per_byte 取 max(8, 8000) = 8000
+     * (expandedae DualCellInventory 实现)
      */
     @Nullable
     private static ItemStack allocateDualCell(StepContents contents) {
         int typeCount = contents.getTotalTypes();
-        long estimatedBytes = estimateBytes(contents);
+        long totalAmount = sumItemCounts(contents.items) + sumFluidAmounts(contents.fluids);
 
         for (int i = 0; i < DUAL_CELL_TIERS.length; i++) {
-            if (typeCount <= CELL_TYPE_SLOTS[i] && estimatedBytes <= CELL_CAPACITIES[i]) {
+            if (fitsInTier(typeCount, totalAmount, i, DUAL_TOTAL_TYPES, FLUID_AMOUNT_PER_BYTE)) {
                 Item cell = ForgeRegistries.ITEMS.getValue(new ResourceLocation(DUAL_CELL_TIERS[i]));
                 if (cell != null) {
+                    LOGGER.info("allocateDualCell: tier={} ({} bytes, {} bpt), {} types, total amount {}",
+                            DUAL_CELL_TIERS[i], CELL_TOTAL_BYTES[i], CELL_BYTES_PER_TYPE[i],
+                            typeCount, totalAmount);
                     return new ItemStack(cell);
                 }
             }
         }
+        LOGGER.warn("allocateDualCell: no tier fits {} types, amount={}", typeCount, totalAmount);
         return null;
     }
 
@@ -228,50 +288,74 @@ public class CellAllocator {
     @Nullable
     private static ItemStack allocateVanillaCell(List<ItemStack> stacks, boolean isFluid) {
         int typeCount = stacks.size();
-        long estimatedBytes = estimateBytes(stacks);
-
+        long totalAmount = isFluid ? sumFluidAmounts(stacks) : sumItemCounts(stacks);
+        int totalTypes = isFluid ? VANILLA_FLUID_TOTAL_TYPES : VANILLA_ITEM_TOTAL_TYPES;
+        long amountPerByte = isFluid ? FLUID_AMOUNT_PER_BYTE : ITEM_AMOUNT_PER_BYTE;
         String[] tiers = isFluid ? VANILLA_FLUID_CELL_TIERS : VANILLA_ITEM_CELL_TIERS;
 
         for (int i = 0; i < tiers.length; i++) {
-            if (typeCount <= CELL_TYPE_SLOTS[i] && estimatedBytes <= CELL_CAPACITIES[i]) {
+            if (fitsInTier(typeCount, totalAmount, i, totalTypes, amountPerByte)) {
                 Item cell = ForgeRegistries.ITEMS.getValue(new ResourceLocation(tiers[i]));
                 if (cell != null) {
+                    LOGGER.info("allocateVanillaCell({}): tier={} ({} bytes, {} bpt), {} types, total amount {}",
+                            isFluid ? "fluid" : "item", tiers[i], CELL_TOTAL_BYTES[i],
+                            CELL_BYTES_PER_TYPE[i], typeCount, totalAmount);
                     return new ItemStack(cell);
                 }
             }
         }
+        LOGGER.warn("allocateVanillaCell({}): no tier fits {} types, amount={}",
+                isFluid ? "fluid" : "item", typeCount, totalAmount);
         return null;
     }
 
     /**
-     * 估算物料所需存储字节数
+     * 检查第 i 层级是否能容纳给定的类型数和总量
+     * 公式: requiredBytes = typeCount * bytesPerType + ceil(totalAmount / amountPerByte)
+     * 必须满足: requiredBytes <= totalBytes AND typeCount <= totalTypes
      */
-    private static long estimateBytes(StepContents contents) {
+    private static boolean fitsInTier(int typeCount, long totalAmount, int tierIndex,
+                                       int totalTypes, long amountPerByte) {
+        if (typeCount > totalTypes) return false;
+        long bytesForTypes = (long) typeCount * CELL_BYTES_PER_TYPE[tierIndex];
+        long bytesForAmount = (totalAmount + amountPerByte - 1) / amountPerByte; // ceil
+        long required = bytesForTypes + bytesForAmount;
+        return required <= CELL_TOTAL_BYTES[tierIndex];
+    }
+
+    /**
+     * 物品列表的总数量 (sum of count)
+     */
+    private static long sumItemCounts(List<ItemStack> items) {
         long total = 0;
-        for (ItemStack stack : contents.items) {
-            total += BYTES_PER_TYPE + estimateItemBytes(stack);
-        }
-        for (ItemStack stack : contents.fluids) {
-            total += BYTES_PER_TYPE + 8; // 流体固定 8 bytes
+        for (ItemStack stack : items) {
+            total += stack.getCount();
         }
         return total;
     }
 
-    private static long estimateBytes(List<ItemStack> stacks) {
+    /**
+     * 流体列表的总量 (sum of amount in mB / L)
+     * 流体用 ItemStack 包装，amount 存在 NBT 的 "amount" 字段
+     */
+    private static long sumFluidAmounts(List<ItemStack> fluidMarkers) {
         long total = 0;
-        for (ItemStack stack : stacks) {
-            total += BYTES_PER_TYPE + estimateItemBytes(stack);
+        for (ItemStack marker : fluidMarkers) {
+            if (marker.hasTag() && marker.getTag().contains("amount")) {
+                total += marker.getTag().getInt("amount");
+            }
         }
         return total;
-    }
-
-    private static long estimateItemBytes(ItemStack stack) {
-        // 粗略估算：每个物品额外占 1-8 bytes
-        return Math.min(8, (stack.getCount() + 63) / 64);
     }
 
     /**
      * 创建装好物品的存储元件 NBT
+     *
+     * 通过 AE2 全局 StorageCells.getCellInventory() 获取该 cell 的 inventory。
+     * 该方法会自动路由到正确的 cell 实现类（AE2 BasicCellInventory / expandedae DualCellInventory 等），
+     * 让其 persist() 写出与 AE2 内部 HashMap 迭代顺序一致的 keys/amts 顺序。
+     *
+     * 如果 cell 类型未知（getCellInventory 返回 null），回退到手动 NBT 构造。
      *
      * @param emptyCell 空存储元件 ItemStack
      * @param items     要存入的物品列表
@@ -282,12 +366,79 @@ public class CellAllocator {
                                               @Nullable List<ItemStack> items,
                                               @Nullable List<ItemStack> fluids) {
         ItemStack filled = emptyCell.copy();
+        filled.setTag(null); // 清空，从干净状态开始
 
-        // 使用空的 AE 存储 NBT 结构标准格式
-        // ic=totalCount, keys=[CompoundTag...], amts=[long...]
-        // 这里使用通用 NBT 构造，不依赖 AE2 内部 API
-        // 运行时 AE2 的 StorageCell 会通过其 ItemInventory 读取这些 NBT
+        // 通过 AE2 全局 API 获取该 cell 的 inventory
+        StorageCell inv = StorageCells.getCellInventory(filled, null);
+        if (inv != null) {
+            return fillViaStorageCell(inv, filled, items, fluids);
+        }
 
+        // 回退：手动构造 NBT（顺序可能与 AE2 内部不一致，但至少能加载）
+        return fillViaManualNbt(filled, items, fluids);
+    }
+
+    /**
+     * 通过 AE2 StorageCell 注入物品，让其 persist() 写出标准格式 NBT
+     */
+    private static ItemStack fillViaStorageCell(StorageCell inv, ItemStack filled,
+                                                 @Nullable List<ItemStack> items,
+                                                 @Nullable List<ItemStack> fluids) {
+        int itemCount = items != null ? items.size() : 0;
+        int fluidCount = fluids != null ? fluids.size() : 0;
+
+        if (items != null) {
+            for (ItemStack stack : items) {
+                if (stack.isEmpty()) continue;
+                AEItemKey key = AEItemKey.of(stack);
+                if (key == null) continue;
+                inv.insert(key, stack.getCount(), Actionable.MODULATE, IActionSource.empty());
+            }
+        }
+        if (fluids != null) {
+            for (ItemStack marker : fluids) {
+                AEFluidKey fluidKey = fluidKeyFromMarker(marker);
+                if (fluidKey == null) continue;
+                long amount = fluidAmountFromMarker(marker);
+                if (amount <= 0) continue;
+                inv.insert(fluidKey, amount, Actionable.MODULATE, IActionSource.empty());
+            }
+        }
+        inv.persist();
+
+        LOGGER.info("createFilledCell ({}): {} items + {} fluids → tag={}",
+                inv.getClass().getSimpleName(), itemCount, fluidCount, filled.getTag());
+        return filled;
+    }
+
+    /**
+     * 从流体标记 ItemStack 提取 AEFluidKey
+     * 标记格式: {fluid_id: "namespace:path", amount: N, fluid_tag: {...}}
+     */
+    @Nullable
+    private static AEFluidKey fluidKeyFromMarker(ItemStack marker) {
+        if (!marker.hasTag() || !marker.getTag().contains("fluid_id")) return null;
+        String fluidId = marker.getTag().getString("fluid_id");
+        Fluid fluid = ForgeRegistries.FLUIDS.getValue(ResourceLocation.tryParse(fluidId));
+        if (fluid == null) return null;
+        if (marker.getTag().contains("fluid_tag")) {
+            return AEFluidKey.of(fluid, marker.getTag().getCompound("fluid_tag"));
+        }
+        return AEFluidKey.of(fluid);
+    }
+
+    private static long fluidAmountFromMarker(ItemStack marker) {
+        if (!marker.hasTag() || !marker.getTag().contains("amount")) return 0;
+        return marker.getTag().getInt("amount");
+    }
+
+    /**
+     * 手动构造 cell NBT（fallback）
+     * 注意：keys 顺序可能与 AE2 内部 HashMap 迭代顺序不一致，会导致 AEItemKey 不匹配
+     */
+    private static ItemStack fillViaManualNbt(ItemStack filled,
+                                               @Nullable List<ItemStack> items,
+                                               @Nullable List<ItemStack> fluids) {
         ListTag keys = new ListTag();
         List<Long> amounts = new ArrayList<>();
         long totalCount = 0;
@@ -310,10 +461,22 @@ public class CellAllocator {
             for (ItemStack stack : fluids) {
                 CompoundTag keyTag = new CompoundTag();
                 keyTag.putString("#c", "ae2:f");
-                keyTag.putString("id", ForgeRegistries.ITEMS.getKey(stack.getItem()).toString());
+                String fluidId;
+                long fluidAmount;
+                if (stack.hasTag() && stack.getTag().contains("fluid_id")) {
+                    fluidId = stack.getTag().getString("fluid_id");
+                    fluidAmount = stack.getTag().getInt("amount");
+                    if (stack.getTag().contains("fluid_tag")) {
+                        keyTag.put("tag", stack.getTag().getCompound("fluid_tag").copy());
+                    }
+                } else {
+                    fluidId = ForgeRegistries.ITEMS.getKey(stack.getItem()).toString();
+                    fluidAmount = stack.getCount();
+                }
+                keyTag.putString("id", fluidId);
                 keys.add(keyTag);
-                amounts.add((long) stack.getCount());
-                totalCount += stack.getCount();
+                amounts.add(fluidAmount);
+                totalCount += fluidAmount;
             }
         }
 
@@ -322,6 +485,10 @@ public class CellAllocator {
         tag.putLongArray("amts", amounts.stream().mapToLong(Long::longValue).toArray());
         tag.putLong("ic", totalCount);
 
+        LOGGER.warn("createFilledCell (manual fallback): {} items + {} fluids → tag={}",
+                items != null ? items.size() : 0,
+                fluids != null ? fluids.size() : 0,
+                filled.getTag());
         return filled;
     }
 
@@ -360,9 +527,5 @@ public class CellAllocator {
         if (stack.isEmpty()) return false;
         CompoundTag tag = stack.getTag();
         return tag != null && tag.contains("ic") && tag.getLong("ic") > 0;
-    }
-
-    private enum CellPriority {
-        DEFAULT, PREFER_VANILLA, PREFER_DUAL
     }
 }
