@@ -427,14 +427,16 @@ public class LayeredRecipeDetector {
 
         // GT IntCircuitIngredient: {configuration:N, type:"gtceu:circuit"}
         // 表示 gtceu:programmed_circuit + {Configuration:N} NBT
+        // 注意: ingredient 序列化用 byte，但 GTCEu 创建 ItemStack 时用 putInt，
+        // 其他 mod 可能按 IntTag 检查，所以这里也用 putInt 保持一致
         if (nbt.contains("type", Tag.TAG_STRING) && "gtceu:circuit".equals(nbt.getString("type"))) {
-            byte configuration = nbt.getByte("configuration");
+            int configuration = nbt.getByte("configuration");
             Item circuit = ForgeRegistries.ITEMS.getValue(
                     ResourceLocation.tryParse("gtceu:programmed_circuit"));
             if (circuit != null) {
                 ItemStack stack = new ItemStack(circuit, 1);
                 CompoundTag stackTag = new CompoundTag();
-                stackTag.putByte("Configuration", configuration);
+                stackTag.putInt("Configuration", configuration);
                 stack.setTag(stackTag);
                 result.add(stack);
             }
