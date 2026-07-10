@@ -1,9 +1,11 @@
 package io.github.ae2lp.ae2layeredpackager.client.patternizer;
 
 import com.mojang.logging.LogUtils;
+import com.mojang.serialization.DynamicOps;
 import dev.emi.emi.api.recipe.EmiRecipe;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.ListTag;
+import net.minecraft.nbt.NbtOps;
 import net.minecraft.nbt.StringTag;
 import net.minecraft.nbt.Tag;
 import net.minecraft.resources.ResourceLocation;
@@ -18,8 +20,10 @@ import org.slf4j.Logger;
 
 import javax.annotation.Nullable;
 import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 
 /**
  * 分层配方检测器。
@@ -131,6 +135,104 @@ public class LayeredRecipeDetector {
             LOGGER.error("Failed to parse layered recipe steps", e);
         }
         return null;
+    }
+
+    /**
+     * 获取任意 GT 配方（分层或非分层）的输入输出。
+     *
+     * 对分层配方：从 GTRecipe.data.layered_steps 解析（每步的 NBT 含 inputs/outputs）。
+     * 对非分层配方：分层步骤不存在，但 inputs/outputs 是 GTRecipe 的 Java 字段，
+     * 不在 data CompoundTag 里。需要通过 LayeredRecipeHelper.RECIPE_WITH_ID_CODEC
+     * 反射调用，把整个 GTRecipe 序列化成 NBT，再用 extractInputItems 等解析。
+     *
+     * 这样可以保留 EMI stack 丢失的 NBT（如 programmed_circuit 的 Configuration）。
+     */
+    @Nullable
+    public static StepContents getGTRecipeContents(EmiRecipe recipe) {
+        if (!isGTLoaded()) return null;
+        initReflection();
+        if (gtEmiRecipeRecipeField == null) return null;
+
+        try {
+            Object gtRecipe = gtEmiRecipeRecipeField.get(recipe);
+            if (gtRecipe == null) return null;
+
+            // 通过 RECIPE_WITH_ID_CODEC 把 GTRecipe 序列化为 NBT
+            CompoundTag recipeTag = serializeGTRecipe(gtRecipe);
+            if (recipeTag == null) {
+                LOGGER.warn("getGTRecipeContents: failed to serialize GTRecipe");
+                return null;
+            }
+
+            // 诊断: 输出顶层 keys 和 inputs/outputs 子 keys，确认 NBT 结构
+            LOGGER.info("getGTRecipeContents: top-level keys = {}", recipeTag.getAllKeys());
+            if (recipeTag.contains("inputs", Tag.TAG_COMPOUND)) {
+                CompoundTag inputsTag = recipeTag.getCompound("inputs");
+                LOGGER.info("getGTRecipeContents: inputs.keys = {}", inputsTag.getAllKeys());
+                for (String key : inputsTag.getAllKeys()) {
+                    if (inputsTag.get(key) instanceof ListTag lt) {
+                        LOGGER.info("getGTRecipeContents: inputs[{}] = {} entries, first = {}",
+                                key, lt.size(), lt.isEmpty() ? "<empty>" : lt.get(0));
+                    } else {
+                        LOGGER.info("getGTRecipeContents: inputs[{}] = {}", key, inputsTag.get(key));
+                    }
+                }
+            } else {
+                LOGGER.warn("getGTRecipeContents: no 'inputs' CompoundTag in serialized recipe");
+            }
+            if (recipeTag.contains("outputs", Tag.TAG_COMPOUND)) {
+                CompoundTag outputsTag = recipeTag.getCompound("outputs");
+                LOGGER.info("getGTRecipeContents: outputs.keys = {}", outputsTag.getAllKeys());
+            }
+
+            List<ItemStack> itemInputs = extractInputItems(recipeTag);
+            List<ItemStack> itemOutputs = extractOutputItems(recipeTag);
+            List<ItemStack> fluidInputs = extractInputFluids(recipeTag);
+            List<ItemStack> fluidOutputs = extractOutputFluids(recipeTag);
+            LOGGER.info("getGTRecipeContents: {} item inputs, {} item outputs, {} fluid inputs, {} fluid outputs",
+                    itemInputs.size(), itemOutputs.size(), fluidInputs.size(), fluidOutputs.size());
+            for (ItemStack is : itemInputs) {
+                if (is.hasTag()) {
+                    LOGGER.info("  input {} x{} nbt={}",
+                            ForgeRegistries.ITEMS.getKey(is.getItem()), is.getCount(), is.getTag());
+                }
+            }
+            return new StepContents(itemInputs, itemOutputs, fluidInputs, fluidOutputs);
+        } catch (Exception e) {
+            LOGGER.error("getGTRecipeContents failed", e);
+            return null;
+        }
+    }
+
+    /**
+     * 通过反射调用 LayeredRecipeHelper.RECIPE_WITH_ID_CODEC 把 GTRecipe 序列化为 CompoundTag。
+     * 注意：NbtOps 和 DynamicOps 是 MC/DFU 自带的，直接 import 用，避免 Class.forName
+     * 在 Forge ModuleClassLoader 下抛 ClassNotFoundException。
+     */
+    @Nullable
+    private static CompoundTag serializeGTRecipe(Object gtRecipe) {
+        try {
+            Class<?> layeredRecipeHelper = Class.forName(
+                    "com.gregtechceu.gtceu.api.recipe.LayeredRecipeHelper");
+            Field codecField = layeredRecipeHelper.getDeclaredField("RECIPE_WITH_ID_CODEC");
+            codecField.setAccessible(true);
+            Object codec = codecField.get(null);
+
+            // 直接用 NbtOps.INSTANCE（编译时引用，避免 ClassLoader 隔离问题）
+            Method encodeStart = codec.getClass().getMethod("encodeStart",
+                    DynamicOps.class, Object.class);
+            Object dataResult = encodeStart.invoke(codec, NbtOps.INSTANCE, gtRecipe);
+
+            Method resultMethod = dataResult.getClass().getMethod("result");
+            Object opt = resultMethod.invoke(dataResult);
+            if (!(opt instanceof Optional<?> optResult) || optResult.isEmpty()) return null;
+            Object tag = optResult.get();
+            if (!(tag instanceof CompoundTag recipeTag)) return null;
+            return recipeTag;
+        } catch (Exception e) {
+            LOGGER.error("serializeGTRecipe failed", e);
+            return null;
+        }
     }
 
     /**
@@ -261,7 +363,14 @@ public class LayeredRecipeDetector {
             if (!entry.contains("content")) continue;
             Tag contentTag = entry.get("content");
             if (contentTag instanceof CompoundTag ingredientNbt) {
-                result.addAll(parseIngredientFromNbt(ingredientNbt));
+                int beforeSize = result.size();
+                var parsed = parseIngredientFromNbt(ingredientNbt);
+                result.addAll(parsed);
+                // 诊断: 如果解析失败（empty），记录原因
+                if (parsed.isEmpty()) {
+                    LOGGER.warn("extractItemsFromCapability[{}][{}/{}] parsed 0 items from content: {}",
+                            key, i + 1, contentList.size(), ingredientNbt);
+                }
             }
         }
     }
@@ -294,30 +403,40 @@ public class LayeredRecipeDetector {
     private static List<ItemStack> parseIngredientFromNbt(CompoundTag nbt) {
         List<ItemStack> result = new ArrayList<>();
 
-        // SizedIngredient: {type: "gtceu:sized", count: N, ingredient: {...}}
+        // SizedIngredient: {type: "gtceu:sized", count: N, ingredient: {...} OR [...]}
+        // ingredient 可以是单个 CompoundTag，也可以是 ListTag (alternatives 列表)
         if (nbt.contains("type", Tag.TAG_STRING) && "gtceu:sized".equals(nbt.getString("type"))) {
             int count = nbt.getInt("count");
-            if (nbt.contains("ingredient", Tag.TAG_COMPOUND)) {
-                for (ItemStack stack : parseIngredientFromNbt(nbt.getCompound("ingredient"))) {
-                    stack.setCount(Math.max(count, 1));
-                    result.add(stack);
-                }
+            for (ItemStack stack : parseIngredientOrAlternatives(nbt, count)) {
+                result.add(stack);
             }
             return result;
         }
 
-        // IntProviderIngredient: {type: "gtceu:int_provider", count_provider: {...}, ingredient: {...}}
+        // IntProviderIngredient: {type: "gtceu:int_provider", count_provider: {...}, ingredient: {...} OR [...]}
         if (nbt.contains("type", Tag.TAG_STRING) && "gtceu:int_provider".equals(nbt.getString("type"))) {
-            if (nbt.contains("ingredient", Tag.TAG_COMPOUND)) {
-                // 使用 count_provider 的 max 值作为数量
-                int count = 1;
-                if (nbt.contains("count_provider", Tag.TAG_COMPOUND)) {
-                    count = nbt.getCompound("count_provider").getInt("max");
-                }
-                for (ItemStack stack : parseIngredientFromNbt(nbt.getCompound("ingredient"))) {
-                    stack.setCount(Math.max(count, 1));
-                    result.add(stack);
-                }
+            int count = 1;
+            if (nbt.contains("count_provider", Tag.TAG_COMPOUND)) {
+                count = nbt.getCompound("count_provider").getInt("max");
+            }
+            for (ItemStack stack : parseIngredientOrAlternatives(nbt, count)) {
+                result.add(stack);
+            }
+            return result;
+        }
+
+        // GT IntCircuitIngredient: {configuration:N, type:"gtceu:circuit"}
+        // 表示 gtceu:programmed_circuit + {Configuration:N} NBT
+        if (nbt.contains("type", Tag.TAG_STRING) && "gtceu:circuit".equals(nbt.getString("type"))) {
+            byte configuration = nbt.getByte("configuration");
+            Item circuit = ForgeRegistries.ITEMS.getValue(
+                    ResourceLocation.tryParse("gtceu:programmed_circuit"));
+            if (circuit != null) {
+                ItemStack stack = new ItemStack(circuit, 1);
+                CompoundTag stackTag = new CompoundTag();
+                stackTag.putByte("Configuration", configuration);
+                stack.setTag(stackTag);
+                result.add(stack);
             }
             return result;
         }
@@ -340,16 +459,54 @@ public class LayeredRecipeDetector {
         // 标签: {tag: "forge:ingots/iron"} — 取第一个匹配物品
         if (nbt.contains("tag", Tag.TAG_STRING)) {
             String tagName = nbt.getString("tag");
-            var tag = net.minecraft.tags.ItemTags.create(ResourceLocation.tryParse(tagName));
-            if (tag != null) {
-                var items = ForgeRegistries.ITEMS.tags().getTag(tag).stream().toList();
-                if (!items.isEmpty()) {
-                    result.add(new ItemStack(items.get(0), 1));
-                }
+            var tagKey = net.minecraft.tags.ItemTags.create(ResourceLocation.tryParse(tagName));
+            var tagItems = ForgeRegistries.ITEMS.tags().getTag(tagKey).stream().toList();
+            LOGGER.info("parseIngredientFromNbt: tag='{}' resolved to {} items", tagName, tagItems.size());
+            if (!tagItems.isEmpty()) {
+                result.add(new ItemStack(tagItems.get(0), 1));
             }
             return result;
         }
 
+        // 未识别的 ingredient 类型 — 记录警告方便排查
+        if (nbt.contains("type", Tag.TAG_STRING)) {
+            LOGGER.warn("parseIngredientFromNbt: unrecognized ingredient type '{}', full nbt={}",
+                    nbt.getString("type"), nbt);
+        } else {
+            LOGGER.warn("parseIngredientFromNbt: unrecognized ingredient format, full nbt={}", nbt);
+        }
+
+        return result;
+    }
+
+    /**
+     * 解析 ingredient 字段，可能是单个 CompoundTag 或 ListTag (alternatives)
+     * 对于 alternatives 列表，取第一个能成功解析的（避免把多种选择编码成多个槽）
+     */
+    private static List<ItemStack> parseIngredientOrAlternatives(CompoundTag nbt, int count) {
+        List<ItemStack> result = new ArrayList<>();
+        if (nbt.contains("ingredient", Tag.TAG_COMPOUND)) {
+            for (ItemStack stack : parseIngredientFromNbt(nbt.getCompound("ingredient"))) {
+                stack.setCount(Math.max(count, 1));
+                result.add(stack);
+            }
+        } else if (nbt.contains("ingredient", Tag.TAG_LIST)) {
+            ListTag altList = nbt.getList("ingredient", Tag.TAG_COMPOUND);
+            for (int i = 0; i < altList.size(); i++) {
+                var sub = parseIngredientFromNbt(altList.getCompound(i));
+                if (!sub.isEmpty()) {
+                    for (ItemStack stack : sub) {
+                        stack.setCount(Math.max(count, 1));
+                        result.add(stack);
+                    }
+                    break; // 只取第一个能解析的 alternative
+                }
+            }
+            if (result.isEmpty()) {
+                LOGGER.warn("parseIngredientOrAlternatives: all {} alternatives failed to parse, full nbt={}",
+                        altList.size(), nbt);
+            }
+        }
         return result;
     }
 

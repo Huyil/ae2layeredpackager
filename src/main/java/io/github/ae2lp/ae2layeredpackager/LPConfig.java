@@ -29,5 +29,12 @@ public class LPConfig {
             .comment("Additional delay after each pattern encoding in milliseconds")
             .defineInRange("delayAdditionalPerPattern", 20, 0, Long.MAX_VALUE);
 
+    // 批量导出配方上限
+    public static final ForgeConfigSpec.IntValue BULK_EXPORT_MAX_RECIPES = BUILDER
+            .comment("Maximum number of recipes allowed for bulk export (Ctrl + click + button).",
+                    "If a category has more recipes than this limit, bulk export is disabled.",
+                    "Set to a high value to effectively disable the limit.")
+            .defineInRange("bulkExportMaxRecipes", 32, 1, 10000);
+
     static final ForgeConfigSpec SPEC = BUILDER.build();
 }

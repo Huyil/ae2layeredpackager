@@ -356,6 +356,7 @@ public class CellAllocator {
      * 让其 persist() 写出与 AE2 内部 HashMap 迭代顺序一致的 keys/amts 顺序。
      *
      * 如果 cell 类型未知（getCellInventory 返回 null），回退到手动 NBT 构造。
+     * 手动构造时按经验把流体放前面（多数实际 cell 的 HashMap 迭代顺序如此）。
      *
      * @param emptyCell 空存储元件 ItemStack
      * @param items     要存入的物品列表
@@ -374,7 +375,9 @@ public class CellAllocator {
             return fillViaStorageCell(inv, filled, items, fluids);
         }
 
-        // 回退：手动构造 NBT（顺序可能与 AE2 内部不一致，但至少能加载）
+        // 回退：手动构造 NBT
+        LOGGER.warn("StorageCells.getCellInventory returned null for {}, falling back to manual NBT. " +
+                "Item ID: {}", ForgeRegistries.ITEMS.getKey(emptyCell.getItem()));
         return fillViaManualNbt(filled, items, fluids);
     }
 
@@ -434,7 +437,7 @@ public class CellAllocator {
 
     /**
      * 手动构造 cell NBT（fallback）
-     * 注意：keys 顺序可能与 AE2 内部 HashMap 迭代顺序不一致，会导致 AEItemKey 不匹配
+     * 流体放前面、物品放后面（经验上更接近 AE2/expandedae HashMap 的实际迭代顺序）
      */
     private static ItemStack fillViaManualNbt(ItemStack filled,
                                                @Nullable List<ItemStack> items,
@@ -443,20 +446,7 @@ public class CellAllocator {
         List<Long> amounts = new ArrayList<>();
         long totalCount = 0;
 
-        if (items != null) {
-            for (ItemStack stack : items) {
-                CompoundTag keyTag = new CompoundTag();
-                keyTag.putString("#c", "ae2:i");
-                keyTag.putString("id", ForgeRegistries.ITEMS.getKey(stack.getItem()).toString());
-                if (stack.getTag() != null && !stack.getTag().isEmpty()) {
-                    keyTag.put("tag", stack.getTag().copy());
-                }
-                keys.add(keyTag);
-                amounts.add((long) stack.getCount());
-                totalCount += stack.getCount();
-            }
-        }
-
+        // 流体先加
         if (fluids != null) {
             for (ItemStack stack : fluids) {
                 CompoundTag keyTag = new CompoundTag();
@@ -480,12 +470,27 @@ public class CellAllocator {
             }
         }
 
+        // 物品后加
+        if (items != null) {
+            for (ItemStack stack : items) {
+                CompoundTag keyTag = new CompoundTag();
+                keyTag.putString("#c", "ae2:i");
+                keyTag.putString("id", ForgeRegistries.ITEMS.getKey(stack.getItem()).toString());
+                if (stack.getTag() != null && !stack.getTag().isEmpty()) {
+                    keyTag.put("tag", stack.getTag().copy());
+                }
+                keys.add(keyTag);
+                amounts.add((long) stack.getCount());
+                totalCount += stack.getCount();
+            }
+        }
+
         CompoundTag tag = filled.getOrCreateTag();
         tag.put("keys", keys);
         tag.putLongArray("amts", amounts.stream().mapToLong(Long::longValue).toArray());
         tag.putLong("ic", totalCount);
 
-        LOGGER.warn("createFilledCell (manual fallback): {} items + {} fluids → tag={}",
+        LOGGER.warn("createFilledCell (manual fallback, fluids first): {} items + {} fluids → tag={}",
                 items != null ? items.size() : 0,
                 fluids != null ? fluids.size() : 0,
                 filled.getTag());
