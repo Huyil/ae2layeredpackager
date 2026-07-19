@@ -81,31 +81,18 @@ public class LayeredPatternHandler<T extends PatternEncodingTermMenu> implements
         }
 
         boolean isLayered = LayeredRecipeDetector.isLayeredRecipe(recipe);
-        LOGGER.info("craft called, isLayered={}", isLayered);
+        boolean multiPatternEnabled = LPConfig.ENABLE_LAYERED_MULTIPATTERN.get();
+        LOGGER.info("craft called, isLayered={}, multiPatternEnabled={}", isLayered, multiPatternEnabled);
 
-        if (isLayered) {
+        if (isLayered && multiPatternEnabled) {
+            // 分层配方 + 多样板编码开启 → N 中间 + 1 组装
             encodeLayeredSynchronous(menu, recipe);
         } else {
-            try {
-                // 优先从 GT recipe NBT 解析（保留 programmed_circuit 等 NBT）
-                var gtContents = LayeredRecipeDetector.getGTRecipeContents(recipe);
-                List<List<GenericStack>> inputs;
-                List<GenericStack> outputs;
-                if (gtContents != null
-                        && (!gtContents.itemInputs.isEmpty() || !gtContents.fluidInputs.isEmpty()
-                        || !gtContents.itemOutputs.isEmpty() || !gtContents.fluidOutputs.isEmpty())) {
-                    inputs = gtInputsToGenericStacks(gtContents);
-                    outputs = gtOutputsToGenericStacks(gtContents);
-                    LOGGER.info("Pattern encoded via GT recipe NBT (NBT preserved)");
-                } else {
-                    inputs = ofInputs(recipe);
-                    outputs = ofOutputs(recipe);
-                    LOGGER.info("Pattern encoded via EMI stacks (fallback)");
-                }
-                EncodingHelper.encodeProcessingRecipe(menu, inputs, outputs);
-            } catch (Exception e) {
-                LOGGER.error("Failed to encode pattern", e);
+            // 单配方编码（非分层，或多样板编码关闭）
+            if (isLayered) {
+                LOGGER.info("Layered recipe but multiPattern disabled, encoding as single combined pattern");
             }
+            encodeSingleRecipeWithCellExpansion(menu, recipe);
         }
 
         if (Minecraft.getInstance().screen instanceof RecipeScreen e) {
@@ -113,6 +100,83 @@ public class LayeredPatternHandler<T extends PatternEncodingTermMenu> implements
         }
         return true;
     }
+
+    /**
+     * 单配方编码 + 可选的 cell 输入展开。
+     * - 优先用 GT NBT 解析（如果 AUTO_ADD_CIRCUIT 开启），否则用 EMI stacks
+     * - 如果 EXPAND_CELL_INPUTS 开启且输入含装满的 cell，额外生成一张"展开"样板（用 cell 内容直接作为输入）
+     */
+    private void encodeSingleRecipeWithCellExpansion(T menu, EmiRecipe recipe) {
+        try {
+            // 主样板编码
+            encodeSingleRecipe(menu, recipe);
+
+            // 如果开启 cell 输入展开，且配方含 cell 输入，额外生成一张展开样板
+            if (LPConfig.EXPAND_CELL_INPUTS.get()) {
+                var expansion = buildCellExpansionInputs(recipe);
+                if (expansion != null) {
+                    PatternEncodingTermMenu petMenu = (PatternEncodingTermMenu) menu;
+                    int encodedPatternSlot = -1;
+                    {
+                        var slots = petMenu.getSlots(SlotSemantics.ENCODED_PATTERN);
+                        if (!slots.isEmpty()) encodedPatternSlot = slots.get(0).index;
+                    }
+                    // 取出上一张样板
+                    callReflectEncode(petMenu);
+                    quickMoveEncoded(petMenu, encodedPatternSlot);
+
+                    // 编码展开样板
+                    EncodingHelper.encodeProcessingRecipe(menu, expansion.inputs(), expansion.outputs());
+                    callReflectEncode(petMenu);
+                    quickMoveEncoded(petMenu, encodedPatternSlot);
+                    LOGGER.info("Cell-expansion pattern encoded ({} input slots → {} outputs)",
+                            expansion.inputs().size(), expansion.outputs().size());
+                }
+            }
+        } catch (Exception e) {
+            LOGGER.error("Failed to encode pattern", e);
+        }
+    }
+
+    /**
+     * 构造 cell 展开样板的输入输出。
+     * 扫描 recipe 的 inputs，如果某个 input 是装满的存储元件（cell），
+     * 用 cell 内的物品/流体替换该 input。其他 input 保持不变。
+     * 如果没有 cell 输入，返回 null（不需要额外样板）。
+     */
+    private CellExpansionResult buildCellExpansionInputs(EmiRecipe recipe) {
+        boolean hasCell = false;
+        List<List<GenericStack>> inputs = new ArrayList<>();
+        List<GenericStack> outputs = ofOutputs(recipe);
+
+        for (EmiIngredient ingredient : recipe.getInputs()) {
+            boolean expanded = false;
+            for (EmiStack es : ingredient.getEmiStacks()) {
+                ItemStack stack = es.getItemStack();
+                if (!stack.isEmpty() && CellAllocator.isCellFilled(stack)) {
+                    // 展开这个 cell 的内容为独立输入槽
+                    var cellStacks = CellAllocator.extractCellContents(stack);
+                    if (cellStacks != null && !cellStacks.isEmpty()) {
+                        for (GenericStack gs : cellStacks) {
+                            inputs.add(List.of(gs));
+                        }
+                        hasCell = true;
+                        expanded = true;
+                        break;
+                    }
+                }
+            }
+            if (!expanded) {
+                // 非 cell 输入，正常添加
+                inputs.add(intoGenericStack(ingredient).stream().limit(1).toList());
+            }
+        }
+
+        if (!hasCell) return null;
+        return new CellExpansionResult(inputs, outputs);
+    }
+
+    private record CellExpansionResult(List<List<GenericStack>> inputs, List<GenericStack> outputs) {}
 
     /**
      * 判断是否触发了批量导出（Ctrl + 在 RecipeScreen 上点击 +）
@@ -234,10 +298,15 @@ public class LayeredPatternHandler<T extends PatternEncodingTermMenu> implements
             if (!slots.isEmpty()) encodedPatternSlot = slots.get(0).index;
         }
 
-        // 检查空白样板数量（跳过分层配方后需要的实际数量）
+        // 检查空白样板数量
+        // - enableLayeredMultiPattern=true 时跳过分层配方（每张分层会出 N+1 张，无法预估）
+        // - enableLayeredMultiPattern=false 时分层配方按 1 张算（走单配方编码）
+        boolean skipLayered = LPConfig.ENABLE_LAYERED_MULTIPATTERN.get();
         int nonLayeredCount = 0;
         for (var r : toEncode) {
-            if (!LayeredRecipeDetector.isLayeredRecipe(r)) nonLayeredCount++;
+            boolean isLayered = LayeredRecipeDetector.isLayeredRecipe(r);
+            if (isLayered && skipLayered) continue;
+            nonLayeredCount++;
         }
         int blankCount = countBlankPatterns(petMenu);
         if (blankCount < nonLayeredCount) {
@@ -256,11 +325,19 @@ public class LayeredPatternHandler<T extends PatternEncodingTermMenu> implements
         int skipped = 0;
         for (EmiRecipe r : toEncode) {
             try {
-                // 跳过分层配方（批量中不处理，避免复杂的多样板逻辑）
-                if (LayeredRecipeDetector.isLayeredRecipe(r)) {
-                    LOGGER.info("Bulk export: skipping layered recipe {}", r.getId());
+                // 仅当 enableLayeredMultiPattern=true 时跳过分层配方（避免在批量中产生 N+1 张样板）
+                // enableLayeredMultiPattern=false 时，分层配方走单配方编码（跟单独点 + 一致）
+                if (LayeredRecipeDetector.isLayeredRecipe(r)
+                        && LPConfig.ENABLE_LAYERED_MULTIPATTERN.get()) {
+                    LOGGER.info("Bulk export: skipping layered recipe {} (multiPattern enabled)", r.getId());
                     skipped++;
                     continue;
+                }
+                // 确保终端 BLANK_PATTERN 槽有空样板（必要时从背包补充）
+                if (!ensureBlankPatternAvailable(petMenu)) {
+                    LOGGER.warn("Bulk export: no blank patterns left, stopping early");
+                    notifyPlayer("§c批量导出提前结束：空样板用完了");
+                    break;
                 }
                 encodeSingleRecipe(menu, r);
                 callReflectEncode((PatternEncodingTermMenu) menu);
@@ -477,22 +554,31 @@ public class LayeredPatternHandler<T extends PatternEncodingTermMenu> implements
     }
 
     /**
-     * 为单个 EmiRecipe 编码（优先用 GT NBT 保留 NBT，回退到 EMI stacks）。
-     * 安全检查：如果 GT 解析出的 inputs 为空，认为解析失败，回退到 EMI stacks
-     * 避免清空编码终端的输入槽（processing mode 会清空未填充的槽）。
+     * 为单个 EmiRecipe 编码。
+     * - AUTO_ADD_CIRCUIT=true (默认): 用 GT NBT 解析，保留 programmed_circuit Configuration 等 NBT
+     * - AUTO_ADD_CIRCUIT=false: 用 EMI stacks (更快但丢 NBT)
+     * 安全检查：如果 GT 解析出的 inputs 为空，回退到 EMI stacks 避免清空编码终端的输入槽。
      */
     private void encodeSingleRecipe(T menu, EmiRecipe r) {
-        var gtContents = LayeredRecipeDetector.getGTRecipeContents(r);
         List<List<GenericStack>> inputs;
         List<GenericStack> outputs;
-        if (gtContents != null
-                && (!gtContents.itemInputs.isEmpty() || !gtContents.fluidInputs.isEmpty())
-                && (!gtContents.itemOutputs.isEmpty() || !gtContents.fluidOutputs.isEmpty())) {
-            inputs = gtInputsToGenericStacks(gtContents);
-            outputs = gtOutputsToGenericStacks(gtContents);
+        if (LPConfig.AUTO_ADD_CIRCUIT.get()) {
+            var gtContents = LayeredRecipeDetector.getGTRecipeContents(r);
+            if (gtContents != null
+                    && (!gtContents.itemInputs.isEmpty() || !gtContents.fluidInputs.isEmpty())
+                    && (!gtContents.itemOutputs.isEmpty() || !gtContents.fluidOutputs.isEmpty())) {
+                inputs = gtInputsToGenericStacks(gtContents);
+                outputs = gtOutputsToGenericStacks(gtContents);
+                LOGGER.info("Pattern encoded via GT recipe NBT (NBT preserved)");
+            } else {
+                inputs = ofInputs(r);
+                outputs = ofOutputs(r);
+                LOGGER.info("Pattern encoded via EMI stacks (GT NBT parse failed, fallback)");
+            }
         } else {
             inputs = ofInputs(r);
             outputs = ofOutputs(r);
+            LOGGER.info("Pattern encoded via EMI stacks (AUTO_ADD_CIRCUIT disabled)");
         }
         EncodingHelper.encodeProcessingRecipe(menu, inputs, outputs);
     }
@@ -526,16 +612,91 @@ public class LayeredPatternHandler<T extends PatternEncodingTermMenu> implements
     }
 
     /**
-     * 统计样板终端里空白样板的总数
+     * 统计可用空样板总数：终端槽 + 玩家背包 + ME 网络（如果启用 sourceBlankPatterns）
      */
     private int countBlankPatterns(PatternEncodingTermMenu menu) {
         int count = 0;
+        // 1. 终端 BLANK_PATTERN 槽
         for (var slot : menu.getSlots(SlotSemantics.BLANK_PATTERN)) {
             if (slot.hasItem()) {
                 count += slot.getItem().getCount();
             }
         }
+        // 2. 玩家背包
+        var player = Minecraft.getInstance().player;
+        if (player != null) {
+            for (ItemStack stack : player.getInventory().items) {
+                if (isBlankPattern(stack)) {
+                    count += stack.getCount();
+                }
+            }
+        }
+        // 3. ME 网络（通过 AE2 客户端 API 查询）
+        if (LPConfig.SOURCE_BLANK_PATTERNS.get()) {
+            count += countMEBlankPatterns();
+        }
         return count;
+    }
+
+    private static boolean isBlankPattern(ItemStack stack) {
+        if (stack.isEmpty()) return false;
+        var id = ForgeRegistries.ITEMS.getKey(stack.getItem());
+        return id != null && "ae2".equals(id.getNamespace()) && "blank_pattern".equals(id.getPath());
+    }
+
+    /**
+     * 通过 AE2 客户端 API 查询 ME 网络中的空样板数量。
+     * TODO: AE2 Client API 在不同版本接口有差异，暂未实现。当前返回 0。
+     * 玩家若需大批量导出，建议直接把空样板放在编码终端的 BLANK_PATTERN 槽或玩家背包。
+     */
+    private int countMEBlankPatterns() {
+        return 0;
+    }
+
+    /**
+     * 在批量编码过程中，如果终端 BLANK_PATTERN 槽空了，从背包或 ME 拉空样板补充。
+     * 通过 QUICK_MOVE 把背包的空样板 stack 移到终端槽。
+     * 返回 true 表示成功补充（或还有余量），false 表示无法补充。
+     */
+    private boolean ensureBlankPatternAvailable(PatternEncodingTermMenu menu) {
+        // 检查终端槽是否还有空样板
+        for (var slot : menu.getSlots(SlotSemantics.BLANK_PATTERN)) {
+            if (slot.hasItem() && slot.getItem().getCount() > 0) {
+                return true;
+            }
+        }
+
+        if (!LPConfig.SOURCE_BLANK_PATTERNS.get()) return false;
+
+        Minecraft mc = Minecraft.getInstance();
+        MultiPlayerGameMode gameMode = mc.gameMode;
+        LocalPlayer player = mc.player;
+        if (gameMode == null || player == null) return false;
+
+        // 从玩家背包找空样板，QUICK_MOVE 到终端槽
+        // 找到 BLANK_PATTERN 槽的 slot index
+        var blankSlots = menu.getSlots(SlotSemantics.BLANK_PATTERN);
+        if (blankSlots.isEmpty()) return false;
+        int blankSlotIndex = blankSlots.get(0).index;
+
+        // 在 menu.slots 中找玩家背包里有 blank_pattern 的槽
+        for (Slot s : menu.slots) {
+            if (s.container != player.getInventory()) continue;
+            ItemStack stack = s.getItem();
+            if (isBlankPattern(stack)) {
+                // QUICK_MOVE 把这个 stack 移到终端槽
+                gameMode.handleInventoryMouseClick(
+                        menu.containerId, s.index, 0, ClickType.QUICK_MOVE, player);
+                LOGGER.info("Refilled blank pattern slot from player inventory (slot={} count={})",
+                        s.index, stack.getCount());
+                return true;
+            }
+        }
+
+        // 背包里没有，尝试 ME 网络（需要更复杂的实现）
+        // TODO: 通过 AE2 pattern slot 的 SHIFT_CLICK 行为从 ME 拉取
+        LOGGER.warn("No blank patterns available in inventory or terminal slot");
+        return false;
     }
 
     /**

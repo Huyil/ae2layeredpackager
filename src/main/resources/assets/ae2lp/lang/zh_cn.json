@@ -1,5 +1,29 @@
 {
     "key.categories.ae2lp": "AE2 分层打包器",
     "key.ae2lp.patternize": "编码样板 (Ctrl+Shift+P)",
-    "key.ae2lp.debug_screen": "调试: 输出当前界面信息 (F10)"
+    "key.ae2lp.debug_screen": "调试: 输出当前界面信息 (F10)",
+
+    "config.ae2lp.enableLayeredMultiPattern": "启用分层配方多样板编码",
+    "config.ae2lp.enableLayeredMultiPattern.tooltip": "开启后，GT 分层配方会编码为 N 张中间样板 + 1 张组装样板。\n关闭后，分层配方走单配方编码（合并所有输入输出）。\n注意：多样板需要外部 cell 拆包机制才能真正自动化。",
+
+    "config.ae2lp.autoAddCircuit": "自动保留电路板 NBT",
+    "config.ae2lp.autoAddCircuit.tooltip": "开启后，直接解析 GT 配方 NBT 以保留 programmed_circuit 的 Configuration (0~32)。\n关闭后使用 EMI stacks（更快但会丢失电路板 NBT）。",
+
+    "config.ae2lp.expandCellInputs": "展开输入 cell 内容",
+    "config.ae2lp.expandCellInputs.tooltip": "开启后，当配方输入包含装满的存储元件时，自动额外生成一张样板，\n使用 cell 内的实际物品/流体作为直接输入（无需空 cell）。\n支持多个 cell 输入。",
+
+    "config.ae2lp.cellPriority": "存储元件优先级",
+    "config.ae2lp.cellPriority.tooltip": "DEFAULT: 优先 dual_storage_cell (expandedae)，无则回退原版\nPREFER_VANILLA: 始终使用 AE2 原版 item_storage_cell + fluid_storage_cell\nPREFER_DUAL: 强制使用 expandedae dual_storage_cell，无则报错",
+
+    "config.ae2lp.bulkExportMaxRecipes": "批量导出配方上限",
+    "config.ae2lp.bulkExportMaxRecipes.tooltip": "批量导出 (Ctrl+点击+按钮) 时允许的最大配方数。\n类别下配方数超过此值时，批量导出会被禁用。\n设很大的值等效于取消限制。",
+
+    "config.ae2lp.sourceBlankPatterns": "自动补充空样板",
+    "config.ae2lp.sourceBlankPatterns.tooltip": "批量导出时如果编码终端的空样板槽不够，\n自动从玩家背包和 ME 网络拉取空样板。\n关闭则只使用终端槽里的空样板。",
+
+    "config.ae2lp.delayPerOperation": "每次操作延迟 (ms)",
+    "config.ae2lp.delayPerOperation.tooltip": "异步编码每次点击操作的间隔毫秒数。",
+
+    "config.ae2lp.delayAdditionalPerPattern": "每张样板额外延迟 (ms)",
+    "config.ae2lp.delayAdditionalPerPattern.tooltip": "每张样板编码完成后的额外延迟毫秒数。"
 }

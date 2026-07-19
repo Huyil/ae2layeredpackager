@@ -6,8 +6,27 @@
   "key.ae2lp.debug_screen": "Debug: Print Current Screen Info (F10)",
   "key.categories.ae2lp": "AE2 Layered Packager",
 
+  "config.ae2lp.enableLayeredMultiPattern": "Enable Layered Multi-Pattern",
+  "config.ae2lp.enableLayeredMultiPattern.tooltip": "When enabled, layered GT recipes are encoded into N intermediate patterns + 1 assembly pattern.\nWhen disabled, layered recipes use single combined pattern encoding.\nNote: multi-pattern requires external cell un-packing mechanism to actually automate.",
+
+  "config.ae2lp.autoAddCircuit": "Auto Preserve Circuit NBT",
+  "config.ae2lp.autoAddCircuit.tooltip": "When enabled, GT recipe NBT is parsed directly to retain programmed_circuit Configuration (0~32).\nWhen disabled, EMI stacks are used (faster but loses circuit Configuration NBT).",
+
+  "config.ae2lp.expandCellInputs": "Expand Cell Inputs",
+  "config.ae2lp.expandCellInputs.tooltip": "When a recipe input is a filled storage cell, auto-generate an additional pattern\nusing the cell's actual contents as direct inputs (no cell needed).\nSupports recipes with multiple cell inputs.",
+
   "config.ae2lp.cellPriority": "Storage Cell Priority",
   "config.ae2lp.cellPriority.tooltip": "DEFAULT: prefer dual_storage_cell, fallback to vanilla\nPREFER_VANILLA: always use vanilla AE2 cells\nPREFER_DUAL: force dual_storage_cell",
+
+  "config.ae2lp.bulkExportMaxRecipes": "Bulk Export Max Recipes",
+  "config.ae2lp.bulkExportMaxRecipes.tooltip": "Maximum number of recipes allowed for bulk export (Ctrl + click + button).\nIf a category has more recipes than this limit, bulk export is disabled.\nSet to a high value to effectively disable the limit.",
+
+  "config.ae2lp.sourceBlankPatterns": "Source Blank Patterns Automatically",
+  "config.ae2lp.sourceBlankPatterns.tooltip": "When bulk export runs out of blank patterns in the encoding terminal slot,\nautomatically pull more from player inventory and ME network.\nDisable to only use what's in the encoding terminal slot.",
+
   "config.ae2lp.delayPerOperation": "Delay Per Operation (ms)",
-  "config.ae2lp.delayAdditionalPerPattern": "Additional Delay Per Pattern (ms)"
+  "config.ae2lp.delayPerOperation.tooltip": "Delay per click operation in milliseconds.",
+
+  "config.ae2lp.delayAdditionalPerPattern": "Additional Delay Per Pattern (ms)",
+  "config.ae2lp.delayAdditionalPerPattern.tooltip": "Additional delay after each pattern encoding in milliseconds."
 }

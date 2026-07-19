@@ -5,6 +5,7 @@ import appeng.api.networking.security.IActionSource;
 import appeng.api.stacks.AEFluidKey;
 import appeng.api.stacks.AEItemKey;
 import appeng.api.stacks.AEKey;
+import appeng.api.stacks.GenericStack;
 import appeng.api.storage.StorageCells;
 import appeng.api.storage.cells.StorageCell;
 import com.mojang.logging.LogUtils;
@@ -12,6 +13,7 @@ import io.github.ae2lp.ae2layeredpackager.LPConfig;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.ListTag;
 import net.minecraft.nbt.LongTag;
+import net.minecraft.nbt.Tag;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
@@ -532,5 +534,51 @@ public class CellAllocator {
         if (stack.isEmpty()) return false;
         CompoundTag tag = stack.getTag();
         return tag != null && tag.contains("ic") && tag.getLong("ic") > 0;
+    }
+
+    /**
+     * 提取 cell 内的实际内容为 GenericStack 列表（用于 cell 输入展开功能）。
+     * 读取 cell NBT 的 keys/amts 数组，按顺序还原为 AEItemKey/AEFluidKey。
+     * 返回 null 表示不是 cell 或读取失败。
+     */
+    @Nullable
+    public static List<GenericStack> extractCellContents(ItemStack cellStack) {
+        if (!isCellFilled(cellStack)) return null;
+        CompoundTag tag = cellStack.getTag();
+        if (tag == null) return null;
+
+        long[] amts = tag.getLongArray("amts");
+        ListTag keys = tag.getList("keys", Tag.TAG_COMPOUND);
+        if (amts.length != keys.size()) return null;
+
+        List<GenericStack> result = new ArrayList<>();
+        for (int i = 0; i < keys.size(); i++) {
+            CompoundTag keyTag = keys.getCompound(i);
+            String channel = keyTag.getString("#c");
+            String id = keyTag.getString("id");
+            long amount = amts[i];
+            if (amount <= 0) continue;
+
+            if ("ae2:i".equals(channel)) {
+                Item item = ForgeRegistries.ITEMS.getValue(ResourceLocation.tryParse(id));
+                if (item != null) {
+                    ItemStack is = new ItemStack(item, 1);
+                    if (keyTag.contains("tag", Tag.TAG_COMPOUND)) {
+                        is.setTag(keyTag.getCompound("tag").copy());
+                    }
+                    result.add(new GenericStack(AEItemKey.of(is), amount));
+                }
+            } else if ("ae2:f".equals(channel)) {
+                Fluid fluid = ForgeRegistries.FLUIDS.getValue(ResourceLocation.tryParse(id));
+                if (fluid != null) {
+                    CompoundTag fluidTag = keyTag.contains("tag", Tag.TAG_COMPOUND)
+                            ? keyTag.getCompound("tag").copy() : null;
+                    AEFluidKey key = fluidTag != null
+                            ? AEFluidKey.of(fluid, fluidTag) : AEFluidKey.of(fluid);
+                    result.add(new GenericStack(key, amount));
+                }
+            }
+        }
+        return result;
     }
 }
